@@ -16,6 +16,7 @@ Usage:
 import argparse
 import json
 import os
+import signal
 import sys
 import time
 from dataclasses import dataclass, field
@@ -248,92 +249,104 @@ TEST_CASES = [
 
 # ── Test Runner ──────────────────────────────────────────────────
 
-def run_tests(agent: SQLAgent, test_cases: list[TestCase]) -> list[TestResult]:
-    """Run all test cases and return results."""
-    results = []
-    total = len(test_cases)
+def _run_single_test(agent: SQLAgent, tc: TestCase, index: int, total: int) -> TestResult:
+    """Run a single test case and return the result."""
+    result = TestResult(
+        test_id=tc.id,
+        question=tc.question,
+        category=tc.category,
+    )
 
-    for i, tc in enumerate(test_cases):
-        print(f"\n[{i+1}/{total}] {tc.category.upper()} | {tc.question[:70]}...", flush=True)
+    try:
+        start = time.time()
+        ctx = agent.run(tc.question)
+        elapsed = int((time.time() - start) * 1000)
 
-        result = TestResult(
-            test_id=tc.id,
-            question=tc.question,
-            category=tc.category,
+        result.latency_ms = elapsed
+        result.repairs = ctx.repair_attempts
+
+        if ctx.generated_sql:
+            result.sql_generated = ctx.generated_sql
+
+        if ctx.state.value == "done":
+            result.execution_ok = True
+        else:
+            result.error = ctx.error or "Agent did not reach DONE state"
+
+        if result.sql_generated:
+            sql_lower = result.sql_generated.lower()
+            missing = [t for t in tc.expected_tables if t.lower() not in sql_lower]
+            result.tables_ok = len(missing) == 0
+            result.missing_tables = missing
+        else:
+            result.tables_ok = False
+
+        if ctx.query_result is not None:
+            result.row_count = len(ctx.query_result)
+            if tc.expect_results:
+                result.results_ok = result.row_count >= tc.expected_min_rows
+            else:
+                result.results_ok = True
+        else:
+            result.results_ok = not tc.expect_results
+
+        if tc.ground_truth_check and ctx.query_result is not None and not ctx.query_result.empty:
+            df_str = ctx.query_result.to_string()
+            result.ground_truth_ok = tc.ground_truth_check.lower() in df_str.lower()
+        elif tc.ground_truth_check:
+            result.ground_truth_ok = False
+        else:
+            result.ground_truth_ok = True
+
+        result.passed = (
+            result.execution_ok
+            and result.tables_ok
+            and result.results_ok
+            and result.ground_truth_ok
         )
 
-        try:
-            start = time.time()
-            ctx = agent.run(tc.question)
-            elapsed = int((time.time() - start) * 1000)
-            result.latency_ms = elapsed
-            result.repairs = ctx.repair_attempts
+        status = "PASS" if result.passed else "FAIL"
+        fail_reasons = []
+        if not result.execution_ok:
+            fail_reasons.append("exec")
+        if not result.tables_ok:
+            fail_reasons.append(f"tables({','.join(result.missing_tables)})")
+        if not result.results_ok:
+            fail_reasons.append(f"rows({result.row_count})")
+        if not result.ground_truth_ok:
+            fail_reasons.append("ground_truth")
 
-            if ctx.generated_sql:
-                result.sql_generated = ctx.generated_sql
+        reason_str = f" [{', '.join(fail_reasons)}]" if fail_reasons else ""
+        print(f"  [{index+1}/{total}] {tc.category.upper()} | {tc.question[:50]}... → {status}{reason_str} | {elapsed}ms", flush=True)
 
-            # Check 1: Execution
-            if ctx.state.value == "done":
-                result.execution_ok = True
-            else:
-                result.error = ctx.error or "Agent did not reach DONE state"
+    except Exception as e:
+        result.error = str(e)
+        print(f"  [{index+1}/{total}] {tc.category.upper()} | {tc.question[:50]}... → ERROR: {e}", flush=True)
 
-            # Check 2: Tables used
-            if result.sql_generated:
-                sql_lower = result.sql_generated.lower()
-                missing = [t for t in tc.expected_tables if t.lower() not in sql_lower]
-                result.tables_ok = len(missing) == 0
-                result.missing_tables = missing
-            else:
-                result.tables_ok = False
+    return result
 
-            # Check 3: Results
-            if ctx.query_result is not None:
-                result.row_count = len(ctx.query_result)
-                if tc.expect_results:
-                    result.results_ok = result.row_count >= tc.expected_min_rows
-                else:
-                    result.results_ok = True  # empty results expected
-            else:
-                result.results_ok = not tc.expect_results
 
-            # Check 4: Ground truth
-            if tc.ground_truth_check and ctx.query_result is not None and not ctx.query_result.empty:
-                df_str = ctx.query_result.to_string()
-                result.ground_truth_ok = tc.ground_truth_check.lower() in df_str.lower()
-            elif tc.ground_truth_check:
-                result.ground_truth_ok = False
-            else:
-                result.ground_truth_ok = True
+def run_tests(agent: SQLAgent, test_cases: list[TestCase], batch_size: int = 3) -> list[TestResult]:
+    """Run test cases in concurrent batches for speed."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            # Overall pass
-            result.passed = (
-                result.execution_ok
-                and result.tables_ok
-                and result.results_ok
-                and result.ground_truth_ok
-            )
+    results: list[TestResult] = []
+    total = len(test_cases)
 
-            status = "PASS" if result.passed else "FAIL"
-            fail_reasons = []
-            if not result.execution_ok:
-                fail_reasons.append("exec")
-            if not result.tables_ok:
-                fail_reasons.append(f"tables({','.join(result.missing_tables)})")
-            if not result.results_ok:
-                fail_reasons.append(f"rows({result.row_count})")
-            if not result.ground_truth_ok:
-                fail_reasons.append("ground_truth")
+    # Process in batches
+    for batch_start in range(0, total, batch_size):
+        batch = test_cases[batch_start:batch_start + batch_size]
 
-            reason_str = f" [{', '.join(fail_reasons)}]" if fail_reasons else ""
-            print(f"  → {status}{reason_str} | {elapsed}ms | {result.row_count} rows | {ctx.repair_attempts} repairs", flush=True)
+        with ThreadPoolExecutor(max_workers=batch_size) as pool:
+            futures = {
+                pool.submit(_run_single_test, agent, tc, batch_start + i, total): tc
+                for i, tc in enumerate(batch)
+            }
+            for future in as_completed(futures):
+                results.append(future.result())
 
-        except Exception as e:
-            result.error = str(e)
-            print(f"  → ERROR: {e}", flush=True)
-
-        results.append(result)
-
+    # Sort by test_id for consistent reporting
+    results.sort(key=lambda r: r.test_id)
     return results
 
 
@@ -446,6 +459,7 @@ def main():
     parser.add_argument("--db-pass", default="")
     parser.add_argument("--limit", type=int, default=100, help="Number of test cases to run")
     parser.add_argument("--category", default=None, help="Run only this category")
+    parser.add_argument("--batch-size", type=int, default=3, help="Concurrent questions per batch")
     parser.add_argument("--output", default="scripts/accuracy_report.txt", help="Output file")
     args = parser.parse_args()
 
@@ -525,7 +539,7 @@ def main():
     print(f"\nRunning {len(cases)} test cases...\n")
 
     # Run tests
-    results = run_tests(agent, cases)
+    results = run_tests(agent, cases, batch_size=args.batch_size)
 
     # Generate report
     report = generate_report(results)

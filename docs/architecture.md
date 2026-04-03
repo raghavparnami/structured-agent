@@ -86,7 +86,8 @@ stateDiagram-v2
     VALIDATE --> REPAIR : invalid SQL
 
     REPAIR --> VALIDATE : fixed SQL
-    REPAIR --> FAILED : max retries (3)
+    REPAIR --> FAILE
+    D : max retries (3)
 
     EXECUTE --> SYNTHESIZE : results ready
     EXECUTE --> REPAIR : execution error

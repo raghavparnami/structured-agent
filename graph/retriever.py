@@ -65,7 +65,7 @@ class GraphRetriever:
         # Phase 1: Sequential — schema linking (each step depends on previous)
         tables = self._find_relevant_tables(query_embedding, combined_query)
         columns = self._find_relevant_columns(tables, query_embedding, combined_query)
-        tables, columns, foreign_keys, join_paths = self._expand_via_graph(tables, columns)
+        tables, columns, foreign_keys, join_paths = self._expand_via_graph(tables, columns, combined_query)
 
         # Phase 2: Parallel — independent matching tasks
         business_terms = []
@@ -230,9 +230,10 @@ class GraphRetriever:
     # ── Step 3: Graph Expansion ───────────────────────────────────
 
     def _expand_via_graph(
-        self, tables: list[TableNode], columns: list[ColumnNode]
+        self, tables: list[TableNode], columns: list[ColumnNode], query_text: str = ""
     ) -> tuple[list[TableNode], list[ColumnNode], list[ForeignKey], list[str]]:
         """Expand context by traversing graph edges — find join paths."""
+        query_lower = query_text.lower()
         table_names = {t.name for t in tables}
         foreign_keys: list[ForeignKey] = []
         join_paths: list[str] = []
@@ -247,44 +248,175 @@ class GraphRetriever:
                         f"JOIN {fk.target_table} ON {fk.join_sql}"
                     )
 
-        # If we have disconnected tables, try to find bridge tables
+        # Auto-include FK neighbors using two process-driven strategies:
+        #
+        # Strategy A: If the question asks for names/labels/descriptions and a
+        # selected table has an FK to a lookup table that has a "name" column,
+        # include that lookup table. This is how "operator name" pulls in employee
+        # and "line name" pulls in production_line — purely from FK structure.
+        #
+        # Strategy B: If a selected table FKs to a small reference table (<100 rows),
+        # and the question mentions a value that exists in that table's sample_values,
+        # include it. This is how "Morning" pulls in shift_type and "India" pulls
+        # in country — from the value catalog, not hardcoded aliases.
+
+        query_words = set(re.findall(r'\b\w+\b', query_lower))
+        # Detect if question asks for names/labels/who
+        wants_names = bool(query_words & {
+            "name", "names", "who", "whom", "person", "people",
+            "operator", "supervisor", "analyst", "manager", "owner",
+        })
+
+        for u, v, edge_data in self.graph.edges(data=True):
+            if edge_data.get("relation") != "FOREIGN_KEY":
+                continue
+            fk: ForeignKey = edge_data.get("data")
+            if not fk:
+                continue
+
+            # Only consider FKs FROM selected tables TO unselected tables
+            if fk.source_table not in table_names or fk.target_table in table_names:
+                continue
+
+            target_node = self._get_table_node(fk.target_table)
+            if not target_node:
+                continue
+
+            target_cols = self._get_table_columns(fk.target_table)
+            target_col_names = {c.name.lower() for c in target_cols}
+            should_include = False
+
+            # Strategy A: question wants names and target has a name-like column
+            if wants_names and target_col_names & {"name", "first_name", "last_name", "title", "full_name"}:
+                should_include = True
+
+            # Strategy B: target is a small lookup and question mentions one of its values
+            if not should_include and target_node.row_count < 100:
+                for col in target_cols:
+                    if col.sample_values:
+                        for val in col.sample_values:
+                            val_lower = val.lower()
+                            # Check if any query word matches a sample value
+                            if len(val_lower) >= 3 and val_lower in query_lower:
+                                should_include = True
+                                break
+                    if should_include:
+                        break
+
+            # Strategy C: FK column name contains a word from the question
+            # e.g., batch.line_id and question mentions "line"
+            if not should_include:
+                fk_col_words = set(fk.source_column.lower().replace("_id", "").replace("_", " ").split())
+                if fk_col_words & query_words:
+                    should_include = True
+
+            if should_include:
+                tables.append(target_node)
+                table_names.add(fk.target_table)
+                columns.extend(target_cols)
+                foreign_keys.append(fk)
+                join_paths.append(f"JOIN {fk.target_table} ON {fk.join_sql}")
+
+        # ── Bridge Table Auto-Discovery ──────────────────────────────
+        # Build an UNDIRECTED graph of table-level connections so we can
+        # find bridges regardless of FK direction. Then for every pair of
+        # selected tables that aren't directly connected, find the shortest
+        # path and include all intermediate (bridge) tables.
+        #
+        # This is how "raw_material" + "scrap_event" discovers:
+        #   raw_material → batch_material_usage → batch → scrap_event
+        # without any hardcoding.
+
         if len(tables) > 1:
-            for t1 in tables:
-                for t2 in tables:
-                    if t1.name != t2.name:
-                        # Check if there's a path in the graph
-                        try:
-                            path = nx.shortest_path(
-                                self.graph,
-                                f"table:{t1.name}",
-                                f"table:{t2.name}",
+            # Step 1: Build weighted undirected table graph from JOINS_TO edges.
+            # High-degree "hub" tables (unit_of_measure, employee, etc.) get
+            # penalized with higher weight so bridges go through meaningful
+            # FK paths (batch_material_usage → batch) instead of generic
+            # lookups (unit_of_measure).
+            table_graph = nx.Graph()
+            # First pass: collect all edges and count degree per table
+            raw_edges = []
+            for u, v, ed in self.graph.edges(data=True):
+                if ed.get("relation") == "JOINS_TO":
+                    t1_name = u.split(":", 1)[1] if u.startswith("table:") else None
+                    t2_name = v.split(":", 1)[1] if v.startswith("table:") else None
+                    if t1_name and t2_name:
+                        raw_edges.append((t1_name, t2_name))
+
+            # Count how many tables each table connects to (degree)
+            degree: dict[str, int] = {}
+            for t1_name, t2_name in raw_edges:
+                degree[t1_name] = degree.get(t1_name, 0) + 1
+                degree[t2_name] = degree.get(t2_name, 0) + 1
+
+            # Second pass: add edges with weight based on degree
+            # High-degree tables (>15 connections) get heavy weight = bad bridge
+            # Low-degree tables (junction/bridge tables) get light weight = good bridge
+            for t1_name, t2_name in raw_edges:
+                # Weight = sum of degrees of both endpoints, capped
+                w = min(degree.get(t1_name, 1), 20) + min(degree.get(t2_name, 1), 20)
+                # If edge already exists, keep lower weight
+                if table_graph.has_edge(t1_name, t2_name):
+                    existing_w = table_graph[t1_name][t2_name]["weight"]
+                    w = min(w, existing_w)
+                table_graph.add_edge(t1_name, t2_name, weight=w)
+
+            # Step 2: For each pair of selected tables, find bridges
+            selected_list = list(table_names)
+            already_checked: set[tuple[str, str]] = set()
+
+            for i, t1_name in enumerate(selected_list):
+                for t2_name in selected_list[i + 1:]:
+                    pair = tuple(sorted([t1_name, t2_name]))
+                    if pair in already_checked:
+                        continue
+                    already_checked.add(pair)
+
+                    # Skip if already directly connected
+                    if table_graph.has_edge(t1_name, t2_name):
+                        continue
+
+                    # Find shortest weighted path — prefers meaningful bridges
+                    # over generic hub tables like unit_of_measure
+                    try:
+                        path = nx.shortest_path(table_graph, t1_name, t2_name, weight="weight")
+                    except (nx.NetworkXNoPath, nx.NodeNotFound):
+                        continue
+
+                    # Only include bridges if path is reasonable (≤ 4 hops)
+                    if len(path) > 5:
+                        continue
+
+                    # Add all intermediate tables (skip endpoints — already selected)
+                    for tname in path[1:-1]:
+                        if tname not in table_names:
+                            bridge = self._get_table_node(tname)
+                            if bridge:
+                                tables.append(bridge)
+                                table_names.add(tname)
+                                bridge_cols = self._get_table_columns(tname)
+                                columns.extend(bridge_cols)
+
+            # Step 3: Now collect ALL FK edges between the final set of tables
+            # (including newly added bridges)
+            foreign_keys = []
+            join_paths = []
+            seen_fks: set[tuple[str, str, str, str]] = set()
+
+            for u, v, ed in self.graph.edges(data=True):
+                if ed.get("relation") == "FOREIGN_KEY":
+                    fk_obj: ForeignKey = ed.get("data")
+                    if not fk_obj:
+                        continue
+                    if fk_obj.source_table in table_names and fk_obj.target_table in table_names:
+                        fk_key = (fk_obj.source_table, fk_obj.source_column,
+                                  fk_obj.target_table, fk_obj.target_column)
+                        if fk_key not in seen_fks:
+                            seen_fks.add(fk_key)
+                            foreign_keys.append(fk_obj)
+                            join_paths.append(
+                                f"JOIN {fk_obj.target_table} ON {fk_obj.join_sql}"
                             )
-                            # Add intermediate tables
-                            for node_id in path:
-                                if node_id.startswith("table:"):
-                                    tname = node_id.split(":", 1)[1]
-                                    if tname not in table_names:
-                                        bridge = self._get_table_node(tname)
-                                        if bridge:
-                                            tables.append(bridge)
-                                            table_names.add(tname)
-                                            bridge_cols = self._get_table_columns(tname)
-                                            columns.extend(bridge_cols)
-                                            # Add FKs for bridge
-                                            for uu, vv, ed in self.graph.edges(data=True):
-                                                if ed.get("relation") == "FOREIGN_KEY":
-                                                    fk2 = ed.get("data")
-                                                    if fk2 and (
-                                                        fk2.source_table == tname
-                                                        or fk2.target_table == tname
-                                                    ):
-                                                        if fk2 not in foreign_keys:
-                                                            foreign_keys.append(fk2)
-                                                            join_paths.append(
-                                                                f"JOIN {fk2.target_table} ON {fk2.join_sql}"
-                                                            )
-                        except (nx.NetworkXNoPath, nx.NodeNotFound):
-                            pass
 
         return tables, columns, foreign_keys, join_paths
 
@@ -332,45 +464,74 @@ class GraphRetriever:
         """
         Match terms in the question against column sample values.
         This is critical for filters like "enterprise" → customer_tier = 'Enterprise'.
+
+        Three matching strategies:
+        1. Exact: sample value appears in question ("Morning" in "Morning shift")
+        2. Substring: query word is a prefix/substring of sample ("US" matches "US-01",
+           "Paracetamol" matches "Paracetamol 500mg Tablets")
+        3. Fuzzy: high SequenceMatcher ratio (>0.8) for close misspellings
         """
         matches: dict[str, list[str]] = {}
         query_lower = query_text.lower()
-
-        # Extract potential filter terms from the question
-        # (words/phrases that might be enum values)
         query_words = set(re.findall(r'\b\w+\b', query_lower))
+
+        # Also extract multi-word phrases (bigrams) for compound names
+        words_list = re.findall(r'\b\w+\b', query_lower)
+        query_phrases = set(query_words)
+        for i in range(len(words_list) - 1):
+            query_phrases.add(f"{words_list[i]} {words_list[i+1]}")
+        for i in range(len(words_list) - 2):
+            query_phrases.add(f"{words_list[i]} {words_list[i+1]} {words_list[i+2]}")
+
+        def _add_match(col_fullname: str, val: str):
+            if col_fullname not in matches:
+                matches[col_fullname] = []
+            if val not in matches[col_fullname]:
+                matches[col_fullname].append(val)
 
         for col in columns:
             if not col.sample_values:
                 continue
-
-            # Only fuzzy match on low-cardinality columns (likely enums)
             if col.distinct_count > 50:
                 continue
+
+            key = col.full_name
 
             for sample_val in col.sample_values:
                 sample_lower = sample_val.lower()
 
-                # Exact match
+                # Strategy 1: Exact — sample appears in question
                 if sample_lower in query_lower:
-                    key = f"{col.full_name}"
-                    if key not in matches:
-                        matches[key] = []
-                    if sample_val not in matches[key]:
-                        matches[key].append(sample_val)
+                    _add_match(key, sample_val)
                     continue
 
-                # Fuzzy match for each query word
+                # Strategy 2: Substring — query word/phrase is a prefix or
+                # significant substring of the sample value
+                matched = False
+                for phrase in query_phrases:
+                    if len(phrase) < 3:
+                        continue
+                    # Query phrase starts the sample: "Paracetamol" → "Paracetamol 500mg Tablets"
+                    if sample_lower.startswith(phrase):
+                        _add_match(key, sample_val)
+                        matched = True
+                        break
+                    # Query phrase is a significant word in the sample
+                    if phrase in sample_lower and len(phrase) >= len(sample_lower) * 0.3:
+                        _add_match(key, sample_val)
+                        matched = True
+                        break
+                if matched:
+                    continue
+
+                # Strategy 3: Fuzzy — close string match for typos/variations
                 for qword in query_words:
                     if len(qword) < 3:
                         continue
                     ratio = SequenceMatcher(None, qword, sample_lower).ratio()
                     if ratio > 0.8:
-                        key = f"{col.full_name}"
-                        if key not in matches:
-                            matches[key] = []
-                        if sample_val not in matches[key]:
-                            matches[key].append(sample_val)
+                        _add_match(key, sample_val)
+                        break
 
         return matches
 
@@ -444,8 +605,12 @@ class GraphRetriever:
         """
         Trim the retrieved context to fit within token budget.
         Priority: tables > columns > FKs > business terms > patterns.
+        Budget scales up for complex queries (more tables = more budget).
         """
-        budget = self.config.max_context_tokens
+        base_budget = self.config.max_context_tokens
+        # Scale budget: +500 tokens for every table beyond 4
+        extra = max(0, len(ctx.tables) - 4) * 500
+        budget = min(base_budget + extra, self.config.max_total_prompt_tokens)
         tokens_used = 0
 
         def estimate_tokens(text: str) -> int:

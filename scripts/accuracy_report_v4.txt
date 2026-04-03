@@ -1,0 +1,66 @@
+======================================================================
+  GRAPHRAG SQL AGENT — ACCURACY TEST REPORT
+======================================================================
+
+  Total Questions:    100
+  Passed:             91 (91.0%)
+  Failed:             9 (9.0%)
+  Average Latency:    8932ms
+  Total Repairs:      5
+  Total Test Time:    893.2s
+
+----------------------------------------------------------------------
+  ACCURACY BY CATEGORY
+----------------------------------------------------------------------
+  Category          Pass  Total     Rate  Avg Latency
+  ─────────────── ────── ────── ──────── ────────────
+  simple              20     20   100.0%       4093ms
+  medium              20     20   100.0%       4939ms
+  hard                18     20    90.0%       6663ms
+  brutal              18     20    90.0%       8503ms
+  nightmare            6     10    60.0%      26057ms
+  edge                 9     10    90.0%      14866ms
+
+----------------------------------------------------------------------
+  FAILURE BREAKDOWN
+----------------------------------------------------------------------
+  Execution failures (SQL error/timeout):   1
+  Wrong tables used:                        6
+  Wrong result count:                       2
+  Ground truth mismatch:                    0
+
+----------------------------------------------------------------------
+  FAILED QUESTIONS
+----------------------------------------------------------------------
+
+  #45 [hard] Show scrap events where the reason category is equipment and...
+    Reason: ROWS: 0
+
+  #56 [hard] Which operators ran batches on the Morning shift that had sc...
+    Reason: ROWS: 0
+
+  #77 [brutal] Which equipment had calibration failures and what batches we...
+    Reason: MISSING_TABLES: equipment_logbook
+
+  #79 [brutal] Compare yield trends between US and India sites by month in ...
+    Reason: MISSING_TABLES: batch
+
+  #82 [nightmare] Show the full traceability for batch BN-2025-001: materials ...
+    Reason: MISSING_TABLES: qc_test_result
+
+  #84 [nightmare] Show a supplier quality scorecard: lots received, lots rejec...
+    Reason: MISSING_TABLES: batch_material_usage,scrap_event
+
+  #89 [nightmare] For batch BN-2025-013, show the complete failure chain: what...
+    Reason: EXEC_FAIL | ROWS: 0
+    Error:  SQL validation failed after 3 repairs: Multiple SQL statements are not allowed
+
+  #90 [nightmare] Which raw materials have the highest scrap cost association ...
+    Reason: MISSING_TABLES: batch_material_usage,batch,scrap_event
+
+  #93 [edge] What is our best performing product by yield?...
+    Reason: MISSING_TABLES: batch
+
+======================================================================
+  OVERALL ACCURACY: 91.0%
+======================================================================
