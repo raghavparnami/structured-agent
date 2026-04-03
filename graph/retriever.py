@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -48,24 +49,40 @@ class GraphRetriever:
         self.few_shot_store = few_shot_store or []
 
     def retrieve(self, question: str, sub_questions: list[str] | None = None) -> RetrievedContext:
-        """Main retrieval pipeline: schema linking + value matching + few-shot."""
+        """
+        Main retrieval pipeline: schema linking + value matching + few-shot.
+
+        Parallelization strategy:
+        - Steps 1-3 are sequential (each depends on previous)
+        - Steps 4, 5, 6, 7 are independent — run in parallel via ThreadPool
+        """
         all_questions = [question] + (sub_questions or [])
         combined_query = " ".join(all_questions)
 
         # Embed the question
         query_embedding = self.llm.embed_single(combined_query)
 
-        # Step 1: Find relevant tables via embedding similarity
+        # Phase 1: Sequential — schema linking (each step depends on previous)
         tables = self._find_relevant_tables(query_embedding, combined_query)
-
-        # Step 2: Find relevant columns (from matched tables + embedding)
         columns = self._find_relevant_columns(tables, query_embedding, combined_query)
-
-        # Step 3: Expand via graph traversal — find join paths
         tables, columns, foreign_keys, join_paths = self._expand_via_graph(tables, columns)
 
-        # Step 4: Match business terms
-        business_terms = self._match_business_terms(query_embedding, combined_query)
+        # Phase 2: Parallel — independent matching tasks
+        business_terms = []
+        value_matches = {}
+        query_patterns = []
+        few_shot_examples = []
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            future_terms = pool.submit(self._match_business_terms, query_embedding, combined_query)
+            future_values = pool.submit(self._fuzzy_match_values, combined_query, columns)
+            future_patterns = pool.submit(self._match_query_patterns, query_embedding)
+            future_fewshot = pool.submit(self._retrieve_few_shot, query_embedding)
+
+            business_terms = future_terms.result()
+            value_matches = future_values.result()
+            query_patterns = future_patterns.result()
+            few_shot_examples = future_fewshot.result()
 
         # Add tables required by matched business terms
         for bt in business_terms:
@@ -75,18 +92,8 @@ class GraphRetriever:
                     table_node = self._get_table_node(table_name)
                     if table_node:
                         tables.append(table_node)
-                        # Also add its columns
                         table_cols = self._get_table_columns(table_name)
                         columns.extend(table_cols)
-
-        # Step 5: Fuzzy match values from the question against value catalog
-        value_matches = self._fuzzy_match_values(combined_query, columns)
-
-        # Step 6: Match query patterns
-        query_patterns = self._match_query_patterns(query_embedding)
-
-        # Step 7: Retrieve similar few-shot examples
-        few_shot_examples = self._retrieve_few_shot(query_embedding)
 
         ctx = RetrievedContext(
             tables=tables,

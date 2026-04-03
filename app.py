@@ -98,6 +98,50 @@ if st.session_state.feedback_learner:
     st.sidebar.metric("Accuracy Rate", f"{stats['accuracy_rate']:.0%}")
 
 
+# ── Helper: Initialize agent from a loaded/built GraphBuilder ────
+
+def _init_agent_from_builder(builder: GraphBuilder, config, llm, adapter):
+    """Initialize all agent components from a GraphBuilder and store in session state."""
+    graph = builder.graph
+
+    table_names = {
+        data["data"].name
+        for _, data in graph.nodes(data=True)
+        if data.get("type") == "table"
+    }
+    column_names = {
+        data["data"].full_name
+        for _, data in graph.nodes(data=True)
+        if data.get("type") == "column"
+    }
+
+    feedback_learner = FeedbackLearner(config, llm, builder)
+    feedback_learner.load_learned_terms_into_graph()
+
+    retriever = GraphRetriever(
+        graph, llm, config.agent,
+        few_shot_store=feedback_learner.few_shot_store,
+    )
+    validator = SQLValidator(config, table_names, column_names, adapter)
+    executor = SQLExecutor(config, adapter)
+
+    agent = SQLAgent(
+        config, llm, retriever, validator, executor,
+        few_shot_store=feedback_learner.few_shot_store,
+        db_dialect=adapter.dialect,
+        date_functions_hint=adapter.date_functions_hint,
+    )
+
+    st.session_state.graph_builder = builder
+    st.session_state.retriever = retriever
+    st.session_state.validator = validator
+    st.session_state.executor = executor
+    st.session_state.agent = agent
+    st.session_state.feedback_learner = feedback_learner
+    st.session_state.graph_built = True
+    st.session_state.current_page = "3. Ask Questions"
+
+
 # ── Page 1: Connection Setup ──────────────────────────────────────
 
 def page_connect():
@@ -241,6 +285,24 @@ def page_build_graph():
     6. **Compute embeddings** for semantic search
     """)
 
+    # Try loading from cache first
+    config = st.session_state.config
+    llm = st.session_state.llm
+    adapter = st.session_state.db_adapter
+
+    if not st.session_state.graph_built:
+        temp_builder = GraphBuilder(config, llm, adapter)
+        if temp_builder.load_cache():
+            st.info("Found cached graph! Loading...")
+            _init_agent_from_builder(temp_builder, config, llm, adapter)
+            st.success(
+                f"Graph loaded from cache! {len(temp_builder.tables)} tables, "
+                f"{temp_builder.graph.number_of_nodes()} nodes. Redirecting..."
+            )
+            import time
+            time.sleep(1)
+            st.rerun()
+
     # Show existing graph info if already built
     if st.session_state.graph_built and st.session_state.graph_builder:
         builder = st.session_state.graph_builder
@@ -262,8 +324,6 @@ def page_build_graph():
         st.caption("Click below to rebuild the graph (e.g. after schema changes)")
 
     if st.button("Build Knowledge Graph" if not st.session_state.graph_built else "Rebuild Knowledge Graph", type="primary"):
-        config = st.session_state.config
-        llm = st.session_state.llm
 
         progress_bar = st.progress(0)
         status_container = st.container()
@@ -301,45 +361,11 @@ def page_build_graph():
 
             detail_text.info(f"Initializing agent components...")
 
-            # Initialize retriever, validator, executor
-            table_names = {
-                data["data"].name
-                for _, data in graph.nodes(data=True)
-                if data.get("type") == "table"
-            }
-            column_names = {
-                data["data"].full_name
-                for _, data in graph.nodes(data=True)
-                if data.get("type") == "column"
-            }
+            # Save cache for instant reload next time
+            builder.save_cache()
 
-            # Initialize feedback learner
-            feedback_learner = FeedbackLearner(config, llm, builder)
-            feedback_learner.load_learned_terms_into_graph()
-
-            retriever = GraphRetriever(
-                graph, llm, config.agent,
-                few_shot_store=feedback_learner.few_shot_store,
-            )
-            validator = SQLValidator(config, table_names, column_names, adapter)
-            executor = SQLExecutor(config, adapter)
-
-            agent = SQLAgent(
-                config, llm, retriever, validator, executor,
-                few_shot_store=feedback_learner.few_shot_store,
-                db_dialect=adapter.dialect,
-                date_functions_hint=adapter.date_functions_hint,
-            )
-
-            # Store in session
-            st.session_state.graph_builder = builder
-            st.session_state.retriever = retriever
-            st.session_state.validator = validator
-            st.session_state.executor = executor
-            st.session_state.agent = agent
-            st.session_state.feedback_learner = feedback_learner
-            st.session_state.graph_built = True
-            st.session_state.current_page = "3. Ask Questions"
+            # Initialize all agent components
+            _init_agent_from_builder(builder, config, llm, adapter)
 
             detail_text.empty()
             status_text.empty()

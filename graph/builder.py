@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import pickle
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -157,25 +159,47 @@ class GraphBuilder:
                     if col.table_name == fk.source_table and col.name == fk.source_column:
                         col.is_foreign_key = True
 
-            # Get distinct counts
-            for table in self.tables:
-                table_cols = [c for c in self.columns if c.table_name == table.name]
-                for col in table_cols:
-                    try:
-                        col.distinct_count = self.adapter.get_distinct_count(
-                            cur, table.schema, table.name, col.name
-                        )
-                    except Exception:
-                        col.distinct_count = 0
-                        conn.rollback()
-
-            # Assign columns to tables
-            for table in self.tables:
-                table.columns = [c for c in self.columns if c.table_name == table.name]
-
             cur.close()
         finally:
             conn.close()
+
+        # Get distinct counts — parallelized per table (separate connections)
+        table_schema_map = {t.name: t.schema for t in self.tables}
+        table_columns_map: dict[str, list[ColumnNode]] = {}
+        for col in self.columns:
+            table_columns_map.setdefault(col.table_name, []).append(col)
+
+        def _count_distinct_for_table(table_name: str, cols: list[ColumnNode]):
+            tconn = self.adapter.connect()
+            try:
+                tcur = tconn.cursor()
+                schema = table_schema_map[table_name]
+                for col in cols:
+                    try:
+                        col.distinct_count = self.adapter.get_distinct_count(
+                            tcur, schema, table_name, col.name
+                        )
+                    except Exception:
+                        col.distinct_count = 0
+                        tconn.rollback()
+                tcur.close()
+            finally:
+                tconn.close()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {
+                pool.submit(_count_distinct_for_table, tname, cols): tname
+                for tname, cols in table_columns_map.items()
+            }
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.warning(f"Distinct count failed for {futures[future]}: {e}")
+
+        # Assign columns to tables
+        for table in self.tables:
+            table.columns = [c for c in self.columns if c.table_name == table.name]
 
         logger.info(
             f"Introspected {len(self.tables)} tables, {len(self.columns)} columns, "
@@ -185,23 +209,47 @@ class GraphBuilder:
     # ── Step 2: Sample Values ─────────────────────────────────────
 
     def _sample_values(self):
-        """Sample distinct values for each column — critical for value catalog."""
-        conn = self.adapter.connect()
+        """
+        Sample distinct values for each column — critical for value catalog.
+        Parallelized: each table's columns are sampled in a separate thread
+        with its own DB connection.
+        """
         n_samples = self.config.agent.sample_values_per_column
-        try:
-            cur = conn.cursor()
-            for col in self.columns:
+
+        # Group columns by table
+        table_columns: dict[str, list[ColumnNode]] = {}
+        for col in self.columns:
+            table_columns.setdefault(col.table_name, []).append(col)
+
+        def _sample_table(table_name: str, cols: list[ColumnNode]):
+            """Sample all columns for one table using a dedicated connection."""
+            conn = self.adapter.connect()
+            try:
+                cur = conn.cursor()
+                for col in cols:
+                    try:
+                        limit = 50 if col.distinct_count <= 50 else n_samples
+                        col.sample_values = self.adapter.get_sample_values(
+                            cur, col.table_name, col.name, limit
+                        )
+                    except Exception:
+                        conn.rollback()
+                        col.sample_values = []
+                cur.close()
+            finally:
+                conn.close()
+
+        # Run tables in parallel (cap at 8 concurrent connections)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {
+                pool.submit(_sample_table, tname, cols): tname
+                for tname, cols in table_columns.items()
+            }
+            for future in as_completed(futures):
                 try:
-                    limit = 50 if col.distinct_count <= 50 else n_samples
-                    col.sample_values = self.adapter.get_sample_values(
-                        cur, col.table_name, col.name, limit
-                    )
-                except Exception:
-                    conn.rollback()
-                    col.sample_values = []
-            cur.close()
-        finally:
-            conn.close()
+                    future.result()
+                except Exception as e:
+                    logger.warning(f"Failed sampling table {futures[future]}: {e}")
 
         logger.info("Sampled values for all columns")
 
@@ -575,3 +623,63 @@ Use ONLY tables/columns from the schema. Generate 5-10 patterns.""",
                     if node_id in self.graph:
                         self.graph.nodes[node_id]["data"] = table
                 break
+
+    # ── Cache: Save / Load ────────────────────────────────────────
+
+    def _cache_path(self) -> str:
+        """Return the cache file path based on db name."""
+        db_name = self.config.db.database or "default"
+        # Sanitize for filename
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in db_name)
+        cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, f"graph_cache_{safe_name}.pkl")
+
+    def save_cache(self):
+        """Save the built graph and all metadata to disk."""
+        cache_data = {
+            "tables": self.tables,
+            "columns": self.columns,
+            "foreign_keys": self.foreign_keys,
+            "business_terms": self.business_terms,
+            "query_patterns": self.query_patterns,
+            "graph": self.graph,
+        }
+        path = self._cache_path()
+        with open(path, "wb") as f:
+            pickle.dump(cache_data, f)
+        logger.info(f"Graph cache saved to {path}")
+
+    def load_cache(self) -> bool:
+        """
+        Load a previously saved graph from disk.
+        Returns True if cache was loaded, False if no cache exists.
+        """
+        path = self._cache_path()
+        if not os.path.exists(path):
+            return False
+
+        try:
+            with open(path, "rb") as f:
+                cache_data = pickle.load(f)
+            self.tables = cache_data["tables"]
+            self.columns = cache_data["columns"]
+            self.foreign_keys = cache_data["foreign_keys"]
+            self.business_terms = cache_data["business_terms"]
+            self.query_patterns = cache_data["query_patterns"]
+            self.graph = cache_data["graph"]
+            logger.info(
+                f"Graph cache loaded: {len(self.tables)} tables, "
+                f"{self.graph.number_of_nodes()} nodes"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to load graph cache: {e}")
+            return False
+
+    def delete_cache(self):
+        """Delete the cached graph file."""
+        path = self._cache_path()
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"Graph cache deleted: {path}")
