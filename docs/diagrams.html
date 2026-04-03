@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GraphRAG SQL Agent — Diagrams</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #e6edf3; padding: 2rem; }
+        h1 { text-align: center; margin-bottom: 2rem; font-size: 2rem; color: #58a6ff; }
+        h2 { margin: 2rem 0 1rem; color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 0.5rem; }
+        .diagram-container { background: #ffffff; border-radius: 12px; padding: 2rem; margin: 1rem 0 2rem; overflow-x: auto; }
+        .mermaid { text-align: center; }
+        .section { max-width: 1200px; margin: 0 auto; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+        th, td { padding: 0.75rem 1rem; text-align: left; border: 1px solid #30363d; }
+        th { background: #161b22; color: #58a6ff; }
+        td { background: #0d1117; }
+        code { background: #161b22; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.9rem; color: #f0883e; }
+        .badge { display: inline-block; padding: 0.25rem 0.75rem; border-radius: 12px; font-size: 0.8rem; font-weight: 600; margin: 0.25rem; }
+        .badge-green { background: #238636; color: #fff; }
+        .badge-blue { background: #1f6feb; color: #fff; }
+        .badge-orange { background: #d29922; color: #000; }
+        .badge-red { background: #da3633; color: #fff; }
+    </style>
+</head>
+<body>
+
+<div class="section">
+
+<h1>GraphRAG SQL Agent</h1>
+
+<!-- ═══════════════════════════════════════════ -->
+<h2>1. System Architecture</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart TB
+    subgraph UI["<b>Streamlit UI</b>"]
+        A[/"User Question"/]
+        F[/"Answer + SQL + Results"/]
+        FB["Thumbs Up / Down / Correct SQL"]
+    end
+
+    subgraph AGENT["<b>Agent Orchestrator</b>"]
+        direction TB
+        R["<b>RETRIEVE</b><br/>Graph Search<br/>~100ms"]
+        G["<b>GENERATE</b><br/>Strong Model<br/>~8-10s"]
+        V["<b>VALIDATE</b><br/>sqlglot + EXPLAIN<br/>~100ms"]
+        RP["<b>REPAIR</b><br/>Strong Model<br/>~8s<br/><i>(only on failure)</i>"]
+        EX["<b>EXECUTE</b><br/>PostgreSQL<br/>~50-500ms"]
+        S["<b>SYNTHESIZE</b><br/>Fast Model<br/>~4-6s"]
+    end
+
+    subgraph GRAPH["<b>Knowledge Graph</b>"]
+        GB["Graph Builder"]
+        GR["Graph Retriever"]
+        NG[("NetworkX<br/>DiGraph")]
+    end
+
+    subgraph LLMP["<b>LLM Provider</b>"]
+        OAI["OpenAI<br/>gpt-4o / gpt-4o-mini"]
+        GEM["Gemini<br/>2.5-pro / 2.0-flash"]
+    end
+
+    subgraph FEED["<b>Feedback Learner</b>"]
+        FSS["Few-Shot Store"]
+        BTS["Business Terms"]
+        FBL["Feedback Log"]
+    end
+
+    subgraph DB["<b>PostgreSQL</b>"]
+        PG[("Target Database")]
+    end
+
+    A --> R
+    R --> G
+    G --> V
+    V -->|valid| EX
+    V -->|invalid| RP
+    RP --> V
+    EX --> S
+    S --> F
+
+    R <-.-> GR
+    GR <-.-> NG
+    GB --> NG
+    GB <-.-> PG
+    G <-.-> LLMP
+    S <-.-> LLMP
+    RP <-.-> LLMP
+    EX <-.-> PG
+
+    FB --> FEED
+    FEED -.-> NG
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<h2>2. Agent State Machine</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+stateDiagram-v2
+    [*] --> RETRIEVE
+
+    RETRIEVE --> GENERATE : schema context ready
+
+    GENERATE --> VALIDATE : SQL generated
+
+    VALIDATE --> EXECUTE : valid
+    VALIDATE --> REPAIR : invalid
+
+    REPAIR --> VALIDATE : fixed SQL
+    REPAIR --> FAILED : max 3 retries
+
+    EXECUTE --> SYNTHESIZE : results
+    EXECUTE --> REPAIR : execution error
+
+    SYNTHESIZE --> DONE : answer ready
+
+    DONE --> [*]
+    FAILED --> [*]
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<h2>3. Knowledge Graph Schema</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+graph LR
+    T["<b>Table</b><br/>name, description<br/>row_count, default_filters<br/>embedding"]
+    C["<b>Column</b><br/>name, data_type<br/>is_pk, is_fk<br/>sample_values<br/>embedding"]
+    BT["<b>BusinessTerm</b><br/>term, sql_expression<br/>source, confidence<br/>embedding"]
+    QP["<b>QueryPattern</b><br/>name, template_sql<br/>use_case<br/>embedding"]
+    FS["<b>FewShotExample</b><br/>question, sql<br/>verified<br/>embedding"]
+
+    T -->|"HAS_COLUMN"| C
+    C -->|"FOREIGN_KEY"| C
+    T -->|"JOINS_TO"| T
+    BT -->|"REQUIRES_TABLE"| T
+    BT -->|"MAPS_TO"| C
+    QP -->|"USES_TABLE"| T
+    FS -.->|"retrieved at query time"| T
+
+    style T fill:#4A90D9,color:#fff,stroke:#fff
+    style C fill:#50C878,color:#fff,stroke:#fff
+    style BT fill:#FF6B6B,color:#fff,stroke:#fff
+    style QP fill:#FFD93D,color:#000,stroke:#000
+    style FS fill:#C084FC,color:#fff,stroke:#fff
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<h2>4. Pagila Knowledge Graph (Live Example)</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+graph TB
+    customer["<b>customer</b><br/>599 rows"]
+    rental["<b>rental</b><br/>16,044 rows"]
+    payment["<b>payment</b><br/>16,049 rows"]
+    film["<b>film</b><br/>1,000 rows"]
+    inventory["<b>inventory</b>"]
+    category["<b>category</b>"]
+    film_category["<b>film_category</b>"]
+    film_actor["<b>film_actor</b>"]
+    actor["<b>actor</b>"]
+    store["<b>store</b>"]
+    address["<b>address</b>"]
+    city["<b>city</b>"]
+    country["<b>country</b>"]
+
+    customer -->|customer_id| rental
+    customer -->|customer_id| payment
+    rental -->|inventory_id| inventory
+    rental -->|rental_id| payment
+    inventory -->|film_id| film
+    film --> film_category
+    film_category -->|category_id| category
+    film --> film_actor
+    film_actor -->|actor_id| actor
+    customer -->|store_id| store
+    customer -->|address_id| address
+    address -->|city_id| city
+    city -->|country_id| country
+
+    rev(["revenue = SUM(payment.amount)"])
+    active(["active customer = WHERE active = 1"])
+    rent_count(["rental count = COUNT(rental_id)"])
+
+    rev -.-> payment
+    active -.-> customer
+    rent_count -.-> rental
+
+    style customer fill:#4A90D9,color:#fff
+    style rental fill:#4A90D9,color:#fff
+    style payment fill:#4A90D9,color:#fff
+    style film fill:#4A90D9,color:#fff
+    style inventory fill:#4A90D9,color:#fff
+    style category fill:#4A90D9,color:#fff
+    style actor fill:#4A90D9,color:#fff
+    style store fill:#4A90D9,color:#fff
+    style rev fill:#FF6B6B,color:#fff
+    style active fill:#FF6B6B,color:#fff
+    style rent_count fill:#FF6B6B,color:#fff
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<h2>5. Graph Build Pipeline</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart LR
+    subgraph P1["Phase 1: Sequential (DB)"]
+        A["Introspect Schema<br/><i>tables, columns, FKs</i>"]
+        B["Sample Values<br/><i>10 per column</i>"]
+    end
+
+    subgraph P2["Phase 2: Parallel (ThreadPool x3)"]
+        C["Descriptions<br/><i>fast model</i>"]
+        D["Business Terms<br/><i>strong model</i>"]
+        E["Query Patterns<br/><i>strong model</i>"]
+    end
+
+    subgraph P3["Phase 3: Sequential"]
+        F["Embeddings<br/><i>batch embed all nodes</i>"]
+        G["Build Graph<br/><i>NetworkX DiGraph</i>"]
+    end
+
+    A --> B
+    B --> C & D & E
+    C & D & E --> F
+    F --> G
+
+    style P1 fill:#E8F4FD,color:#000
+    style P2 fill:#FFF3E0,color:#000
+    style P3 fill:#E8F5E9,color:#000
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<h2>6. Feedback Learning Loop</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+flowchart TB
+    Q["User asks question"] --> SQL["Agent generates SQL"]
+    SQL --> RES["Show results + SQL"]
+
+    RES --> UP["Thumbs Up"]
+    RES --> DOWN["Thumbs Down"]
+    RES --> CORR["User corrects SQL"]
+
+    UP --> SAVE["Save as verified<br/>few-shot example"]
+    DOWN --> LOG["Log for review"]
+    CORR --> EXTRACT["LLM extracts:<br/>new business terms<br/>+ default filters"]
+    CORR --> SAVE
+
+    SAVE --> DEDUP["Deduplicate<br/><i>similarity > 0.95 = merge</i>"]
+    DEDUP --> PRUNE["Prune<br/><i>max 100 examples</i><br/><i>keep all verified</i>"]
+    PRUNE --> DISK["few_shot_examples.json"]
+
+    EXTRACT --> TERMS["learned_business_terms.json"]
+    EXTRACT --> GRAPH["Update Knowledge Graph"]
+
+    DISK --> NEXT["Next query:<br/>retrieved as few-shot context"]
+    TERMS --> NEXT
+    GRAPH --> NEXT
+
+    style UP fill:#238636,color:#fff
+    style DOWN fill:#da3633,color:#fff
+    style CORR fill:#d29922,color:#000
+    style SAVE fill:#50C878,color:#fff
+    style EXTRACT fill:#FFD93D,color:#000
+    style DISK fill:#C084FC,color:#fff
+    style TERMS fill:#FF6B6B,color:#fff
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<h2>7. Token Budget System</h2>
+<div class="diagram-container">
+<pre class="mermaid">
+pie title Token Budget Per Query (max 5,000)
+    "Schema Context (tables + columns)" : 1800
+    "Join Paths + FKs" : 300
+    "Business Terms" : 400
+    "Few-Shot Examples (max 800)" : 500
+    "Question + System Prompt" : 500
+    "Query Patterns" : 200
+    "Headroom" : 1300
+</pre>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<h2>8. Model Recommendations</h2>
+
+<h3>OpenAI</h3>
+<table>
+    <tr><th>Role</th><th>Model</th><th>Latency</th><th>Cost/1M tokens</th></tr>
+    <tr><td><span class="badge badge-red">Strong</span> SQL gen + repair</td><td><code>gpt-4o</code></td><td>2-4s</td><td>$2.50 in / $10 out</td></tr>
+    <tr><td><span class="badge badge-green">Fast</span> Synthesize</td><td><code>gpt-4o-mini</code></td><td>1-2s</td><td>$0.15 in / $0.60 out</td></tr>
+    <tr><td><span class="badge badge-blue">Embed</span></td><td><code>text-embedding-3-small</code></td><td>~200ms</td><td>$0.02</td></tr>
+</table>
+
+<h3>Gemini</h3>
+<table>
+    <tr><th>Role</th><th>Model</th><th>Latency</th><th>Cost/1M tokens</th></tr>
+    <tr><td><span class="badge badge-red">Strong</span> SQL gen + repair</td><td><code>gemini-2.5-pro</code></td><td>5-10s</td><td>$1.25 in / $10 out</td></tr>
+    <tr><td><span class="badge badge-green">Fast</span> Synthesize</td><td><code>gemini-2.0-flash</code></td><td>2-4s</td><td>$0.10 in / $0.40 out</td></tr>
+    <tr><td><span class="badge badge-blue">Embed</span></td><td><code>gemini-embedding-001</code></td><td>~300ms</td><td>Free (under limits)</td></tr>
+</table>
+
+<h3>Recommended Configs</h3>
+<table>
+    <tr><th>Priority</th><th>Strong</th><th>Fast</th><th>Embed</th><th>E2E Latency</th><th>Cost/Query</th></tr>
+    <tr><td><span class="badge badge-green">Best Accuracy (OpenAI)</span></td><td>gpt-4o</td><td>gpt-4o-mini</td><td>text-embedding-3-small</td><td>4-8s</td><td>~$0.02</td></tr>
+    <tr><td><span class="badge badge-blue">Best Speed (OpenAI)</span></td><td>gpt-4.1-mini</td><td>gpt-4.1-mini</td><td>text-embedding-3-small</td><td>2-5s</td><td>~$0.005</td></tr>
+    <tr><td><span class="badge badge-green">Best Accuracy (Gemini)</span></td><td>gemini-2.5-pro</td><td>gemini-2.0-flash</td><td>gemini-embedding-001</td><td>8-16s</td><td>~$0.01</td></tr>
+    <tr><td><span class="badge badge-orange">Best Balance (Gemini)</span></td><td>gemini-2.5-flash</td><td>gemini-2.0-flash-lite</td><td>gemini-embedding-001</td><td>5-10s</td><td>~$0.005</td></tr>
+</table>
+
+</div>
+
+<script>
+    mermaid.initialize({
+        startOnLoad: true,
+        theme: 'default',
+        themeVariables: {
+            fontSize: '14px',
+        },
+        flowchart: { curve: 'basis', padding: 20 },
+        stateDiagram: { padding: 20 },
+    });
+</script>
+</body>
+</html>
