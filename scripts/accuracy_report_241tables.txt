@@ -1,0 +1,71 @@
+======================================================================
+  GRAPHRAG SQL AGENT — ACCURACY TEST REPORT
+======================================================================
+
+  Total Questions:    100
+  Passed:             89 (89.0%)
+  Failed:             11 (11.0%)
+  Average Latency:    13742ms
+  Total Repairs:      0
+  Total Test Time:    1374.2s
+
+----------------------------------------------------------------------
+  ACCURACY BY CATEGORY
+----------------------------------------------------------------------
+  Category          Pass  Total     Rate  Avg Latency
+  ─────────────── ────── ────── ──────── ────────────
+  simple              20     20   100.0%       8396ms
+  medium              19     20    95.0%      10738ms
+  hard                16     20    80.0%      12298ms
+  brutal              16     20    80.0%      15627ms
+  nightmare            9     10    90.0%      30750ms
+  edge                 9     10    90.0%      12552ms
+
+----------------------------------------------------------------------
+  FAILURE BREAKDOWN
+----------------------------------------------------------------------
+  Execution failures (SQL error/timeout):   0
+  Wrong tables used:                        8
+  Wrong result count:                       3
+  Ground truth mismatch:                    0
+
+----------------------------------------------------------------------
+  FAILED QUESTIONS
+----------------------------------------------------------------------
+
+  #28 [medium] What is the total scrap cost per batch?...
+    Reason: MISSING_TABLES: scrap_event
+
+  #45 [hard] Show scrap events where the reason category is equipment and...
+    Reason: ROWS: 0
+
+  #48 [hard] What is the scrap cost by production line and product?...
+    Reason: MISSING_TABLES: scrap_event,batch
+
+  #52 [hard] What is the total scrap cost per site?...
+    Reason: MISSING_TABLES: scrap_event
+
+  #56 [hard] Which operators ran batches on the Morning shift that had sc...
+    Reason: ROWS: 0
+
+  #64 [brutal] What is the scrap rate by product and site for Q1 2025?...
+    Reason: MISSING_TABLES: scrap_event,batch
+
+  #71 [brutal] Which production lines had the worst OEE and highest scrap r...
+    Reason: MISSING_TABLES: scrap_event,batch
+
+  #77 [brutal] Which equipment had calibration failures and what batches we...
+    Reason: MISSING_TABLES: equipment_logbook
+
+  #79 [brutal] Compare yield trends between US and India sites by month in ...
+    Reason: MISSING_TABLES: batch
+
+  #90 [nightmare] Which raw materials have the highest scrap cost association ...
+    Reason: ROWS: 0
+
+  #94 [edge] How much money did we waste on scrap in total?...
+    Reason: MISSING_TABLES: scrap_event
+
+======================================================================
+  OVERALL ACCURACY: 89.0%
+======================================================================
