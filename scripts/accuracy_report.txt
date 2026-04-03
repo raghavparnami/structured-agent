@@ -1,0 +1,101 @@
+======================================================================
+  GRAPHRAG SQL AGENT — ACCURACY TEST REPORT
+======================================================================
+
+  Total Questions:    100
+  Passed:             79 (79.0%)
+  Failed:             21 (21.0%)
+  Average Latency:    8436ms
+  Total Repairs:      1
+  Total Test Time:    843.6s
+
+----------------------------------------------------------------------
+  ACCURACY BY CATEGORY
+----------------------------------------------------------------------
+  Category          Pass  Total     Rate  Avg Latency
+  ─────────────── ────── ────── ──────── ────────────
+  simple              20     20   100.0%       5010ms
+  medium              20     20   100.0%       4837ms
+  hard                14     20    70.0%       6354ms
+  brutal              11     20    55.0%       9053ms
+  nightmare            4     10    40.0%      27211ms
+  edge                10     10   100.0%       6643ms
+
+----------------------------------------------------------------------
+  FAILURE BREAKDOWN
+----------------------------------------------------------------------
+  Execution failures (SQL error/timeout):   0
+  Wrong tables used:                        14
+  Wrong result count:                       7
+  Ground truth mismatch:                    0
+
+----------------------------------------------------------------------
+  FAILED QUESTIONS
+----------------------------------------------------------------------
+
+  #41 [hard] Show scrap events from the Morning shift with reason names a...
+    Reason: MISSING_TABLES: shift_type
+
+  #42 [hard] List all batches of Paracetamol 500mg with their yield and p...
+    Reason: ROWS: 0
+
+  #44 [hard] Which suppliers provided materials used in rejected batches?...
+    Reason: ROWS: 0
+
+  #45 [hard] Show scrap events where the reason category is equipment and...
+    Reason: ROWS: 0
+
+  #48 [hard] What is the scrap cost by production line and product?...
+    Reason: MISSING_TABLES: scrap_event
+
+  #56 [hard] Which operators ran batches on the Morning shift that had sc...
+    Reason: MISSING_TABLES: employee | ROWS: 0
+
+  #61 [brutal] Show scrap events with batch number, product name, line name...
+    Reason: MISSING_TABLES: production_line
+
+  #66 [brutal] List all raw materials from approved Indian suppliers used i...
+    Reason: MISSING_TABLES: country | ROWS: 0
+
+  #67 [brutal] Show the full deviation-to-CAPA chain: deviation number, typ...
+    Reason: MISSING_TABLES: employee
+
+  #69 [brutal] Show batches where in-process checks failed with the test ty...
+    Reason: ROWS: 0
+
+  #72 [brutal] Show all material lots used in batch BN-2025-013 with materi...
+    Reason: ROWS: 0
+
+  #76 [brutal] Show sales orders with customer name, product name, and ship...
+    Reason: ROWS: 0
+
+  #77 [brutal] Which equipment had calibration failures and what batches we...
+    Reason: MISSING_TABLES: equipment_logbook
+
+  #78 [brutal] Show scrap events caused by operator error with the operator...
+    Reason: MISSING_TABLES: employee
+
+  #79 [brutal] Compare yield trends between US and India sites by month in ...
+    Reason: MISSING_TABLES: batch
+
+  #81 [nightmare] For each supplier, show materials supplied, lots rejected, b...
+    Reason: MISSING_TABLES: batch_material_usage,deviation
+
+  #82 [nightmare] Show the full traceability for batch BN-2025-001: materials ...
+    Reason: MISSING_TABLES: raw_material,qc_test_result
+
+  #84 [nightmare] Show a supplier quality scorecard: lots received, lots rejec...
+    Reason: MISSING_TABLES: batch_material_usage
+
+  #87 [nightmare] Compare equipment OEE against scrap rate for each production...
+    Reason: MISSING_TABLES: scrap_event,batch
+
+  #88 [nightmare] Show the complete deviation history for Tablet Line 1: devia...
+    Reason: ROWS: 0
+
+  #90 [nightmare] Which raw materials have the highest scrap cost association ...
+    Reason: MISSING_TABLES: batch_material_usage,batch,scrap_event
+
+======================================================================
+  OVERALL ACCURACY: 79.0%
+======================================================================
