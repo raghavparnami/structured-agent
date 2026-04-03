@@ -1,0 +1,62 @@
+======================================================================
+  GRAPHRAG SQL AGENT — ACCURACY TEST REPORT
+======================================================================
+
+  Total Questions:    100
+  Passed:             92 (92.0%)
+  Failed:             8 (8.0%)
+  Average Latency:    13910ms
+  Total Repairs:      0
+  Total Test Time:    1391.0s
+
+----------------------------------------------------------------------
+  ACCURACY BY CATEGORY
+----------------------------------------------------------------------
+  Category          Pass  Total     Rate  Avg Latency
+  ─────────────── ────── ────── ──────── ────────────
+  simple              20     20   100.0%       9527ms
+  medium              20     20   100.0%      10187ms
+  hard                17     20    85.0%      12680ms
+  brutal              17     20    85.0%      14864ms
+  nightmare            9     10    90.0%      32790ms
+  edge                 9     10    90.0%      11792ms
+
+----------------------------------------------------------------------
+  FAILURE BREAKDOWN
+----------------------------------------------------------------------
+  Execution failures (SQL error/timeout):   0
+  Wrong tables used:                        5
+  Wrong result count:                       3
+  Ground truth mismatch:                    0
+
+----------------------------------------------------------------------
+  FAILED QUESTIONS
+----------------------------------------------------------------------
+
+  #45 [hard] Show scrap events where the reason category is equipment and...
+    Reason: ROWS: 0
+
+  #48 [hard] What is the scrap cost by production line and product?...
+    Reason: MISSING_TABLES: scrap_event,batch
+
+  #56 [hard] Which operators ran batches on the Morning shift that had sc...
+    Reason: ROWS: 0
+
+  #71 [brutal] Which production lines had the worst OEE and highest scrap r...
+    Reason: MISSING_TABLES: scrap_event,batch
+
+  #77 [brutal] Which equipment had calibration failures and what batches we...
+    Reason: MISSING_TABLES: equipment_logbook
+
+  #79 [brutal] Compare yield trends between US and India sites by month in ...
+    Reason: MISSING_TABLES: batch
+
+  #90 [nightmare] Which raw materials have the highest scrap cost association ...
+    Reason: ROWS: 0
+
+  #93 [edge] What is our best performing product by yield?...
+    Reason: MISSING_TABLES: batch
+
+======================================================================
+  OVERALL ACCURACY: 92.0%
+======================================================================

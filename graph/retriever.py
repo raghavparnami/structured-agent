@@ -152,23 +152,15 @@ class GraphRetriever:
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        # Take top N tables above threshold
-        # Use a two-tier approach: pick high-confidence tables first,
-        # then include medium-confidence tables up to the limit
-        threshold_high = 0.35
-        threshold_low = 0.25
-        max_tables = self.config.max_tables_in_context
+        # Take tables above threshold — use a generous initial limit so the
+        # Steiner tree has enough candidates to discover bridge tables.
+        # Final trimming happens after Steiner tree + FK expansion.
+        threshold = 0.25
+        # Allow up to 2x max_tables as candidates for Steiner tree
+        candidate_limit = self.config.max_tables_in_context * 2
+        result = [t for score, t in scored if score > threshold][:candidate_limit]
 
-        high_conf = [t for score, t in scored if score > threshold_high]
-        medium_conf = [t for score, t in scored if threshold_low < score <= threshold_high]
-
-        # Start with high-confidence, fill remaining with medium
-        result = high_conf[:max_tables]
-        remaining = max_tables - len(result)
-        if remaining > 0:
-            result.extend(medium_conf[:remaining])
-
-        # Always include at least top 3 (was 2 — helps complex queries)
+        # Always include at least top 3
         if len(result) < 3 and scored:
             result = [t for _, t in scored[:3]]
 
@@ -328,24 +320,28 @@ class GraphRetriever:
                 foreign_keys.append(fk)
                 join_paths.append(f"JOIN {fk.target_table} ON {fk.join_sql}")
 
-        # ── Bridge Table Auto-Discovery ──────────────────────────────
-        # Build an UNDIRECTED graph of table-level connections so we can
-        # find bridges regardless of FK direction. Then for every pair of
-        # selected tables that aren't directly connected, find the shortest
-        # path and include all intermediate (bridge) tables.
+        # ── Bridge Table Auto-Discovery via Steiner Tree ─────────────
         #
-        # This is how "raw_material" + "scrap_event" discovers:
-        #   raw_material → batch_material_usage → batch → scrap_event
-        # without any hardcoding.
+        # Problem: given selected "terminal" tables {raw_material, batch,
+        # scrap_event}, find the minimum-cost subgraph connecting ALL of
+        # them simultaneously. Bridge/junction tables like batch_material_usage
+        # emerge as "Steiner vertices" — intermediate nodes needed for
+        # connectivity.
+        #
+        # Algorithm: KMB (Kou-Markowsky-Berman) 2-approximation
+        #   1. Build weighted undirected table graph (hub tables get high weight)
+        #   2. Compute metric closure on terminal nodes (shortest path between
+        #      every pair of terminals)
+        #   3. Find MST of the metric closure
+        #   4. Expand MST edges back to original paths → Steiner vertices are
+        #      the bridge tables
+        #
+        # Complexity: O(|T|² × |V|) where T=terminals, V=all tables
+        # For 10 terminals, 119 tables: ~12,000 ops — instant.
 
         if len(tables) > 1:
-            # Step 1: Build weighted undirected table graph from JOINS_TO edges.
-            # High-degree "hub" tables (unit_of_measure, employee, etc.) get
-            # penalized with higher weight so bridges go through meaningful
-            # FK paths (batch_material_usage → batch) instead of generic
-            # lookups (unit_of_measure).
+            # Step 1: Build weighted undirected table graph
             table_graph = nx.Graph()
-            # First pass: collect all edges and count degree per table
             raw_edges = []
             for u, v, ed in self.graph.edges(data=True):
                 if ed.get("relation") == "JOINS_TO":
@@ -354,59 +350,35 @@ class GraphRetriever:
                     if t1_name and t2_name:
                         raw_edges.append((t1_name, t2_name))
 
-            # Count how many tables each table connects to (degree)
+            # Weight edges by degree: high-degree hub tables (unit_of_measure,
+            # employee) get heavy weight → Steiner tree avoids routing through them
             degree: dict[str, int] = {}
             for t1_name, t2_name in raw_edges:
                 degree[t1_name] = degree.get(t1_name, 0) + 1
                 degree[t2_name] = degree.get(t2_name, 0) + 1
 
-            # Second pass: add edges with weight based on degree
-            # High-degree tables (>15 connections) get heavy weight = bad bridge
-            # Low-degree tables (junction/bridge tables) get light weight = good bridge
             for t1_name, t2_name in raw_edges:
-                # Weight = sum of degrees of both endpoints, capped
                 w = min(degree.get(t1_name, 1), 20) + min(degree.get(t2_name, 1), 20)
-                # If edge already exists, keep lower weight
                 if table_graph.has_edge(t1_name, t2_name):
-                    existing_w = table_graph[t1_name][t2_name]["weight"]
-                    w = min(w, existing_w)
+                    w = min(w, table_graph[t1_name][t2_name]["weight"])
                 table_graph.add_edge(t1_name, t2_name, weight=w)
 
-            # Step 2: For each pair of selected tables, find bridges
-            selected_list = list(table_names)
-            already_checked: set[tuple[str, str]] = set()
+            # Step 2: KMB Steiner Tree approximation
+            # Terminal nodes = selected tables that exist in the table graph
+            terminals = [t for t in table_names if t in table_graph]
 
-            for i, t1_name in enumerate(selected_list):
-                for t2_name in selected_list[i + 1:]:
-                    pair = tuple(sorted([t1_name, t2_name]))
-                    if pair in already_checked:
-                        continue
-                    already_checked.add(pair)
+            if len(terminals) >= 2:
+                steiner_vertices = self._steiner_tree_kmb(table_graph, terminals)
 
-                    # Skip if already directly connected
-                    if table_graph.has_edge(t1_name, t2_name):
-                        continue
-
-                    # Find shortest weighted path — prefers meaningful bridges
-                    # over generic hub tables like unit_of_measure
-                    try:
-                        path = nx.shortest_path(table_graph, t1_name, t2_name, weight="weight")
-                    except (nx.NetworkXNoPath, nx.NodeNotFound):
-                        continue
-
-                    # Only include bridges if path is reasonable (≤ 4 hops)
-                    if len(path) > 5:
-                        continue
-
-                    # Add all intermediate tables (skip endpoints — already selected)
-                    for tname in path[1:-1]:
-                        if tname not in table_names:
-                            bridge = self._get_table_node(tname)
-                            if bridge:
-                                tables.append(bridge)
-                                table_names.add(tname)
-                                bridge_cols = self._get_table_columns(tname)
-                                columns.extend(bridge_cols)
+                # Step 3: Add discovered Steiner vertices (bridge tables)
+                for tname in steiner_vertices:
+                    if tname not in table_names:
+                        bridge = self._get_table_node(tname)
+                        if bridge:
+                            tables.append(bridge)
+                            table_names.add(tname)
+                            bridge_cols = self._get_table_columns(tname)
+                            columns.extend(bridge_cols)
 
             # Step 3: Now collect ALL FK edges between the final set of tables
             # (including newly added bridges)
@@ -676,6 +648,82 @@ class GraphRetriever:
         return ctx
 
     # ── Helpers ────────────────────────────────────────────────────
+
+    def _steiner_tree_kmb(
+        self, graph: nx.Graph, terminals: list[str]
+    ) -> set[str]:
+        """
+        KMB 2-approximation for the Steiner tree problem.
+
+        Given a weighted graph and a set of terminal nodes, find the
+        minimum-cost set of intermediate (Steiner) vertices needed to
+        connect all terminals.
+
+        Algorithm:
+        1. Compute shortest paths between all pairs of terminals
+        2. Build a complete "metric closure" graph on terminals
+        3. Find MST of the metric closure
+        4. Expand MST edges back to original graph paths
+        5. Return all non-terminal nodes on those paths (= Steiner vertices)
+
+        Returns set of Steiner vertex names (bridge table names).
+        """
+        if len(terminals) < 2:
+            return set()
+
+        # Step 1: Compute shortest paths between all terminal pairs
+        # Cache shortest paths from each terminal
+        shortest_paths: dict[str, dict[str, list[str]]] = {}
+        shortest_dists: dict[str, dict[str, float]] = {}
+
+        for t in terminals:
+            try:
+                shortest_dists[t] = nx.single_source_dijkstra_path_length(
+                    graph, t, weight="weight"
+                )
+                shortest_paths[t] = nx.single_source_dijkstra_path(
+                    graph, t, weight="weight"
+                )
+            except nx.NodeNotFound:
+                continue
+
+        # Step 2: Build metric closure — complete graph on terminals
+        metric_closure = nx.Graph()
+        for i, t1 in enumerate(terminals):
+            if t1 not in shortest_dists:
+                continue
+            for t2 in terminals[i + 1:]:
+                if t2 in shortest_dists[t1]:
+                    metric_closure.add_edge(
+                        t1, t2,
+                        weight=shortest_dists[t1][t2],
+                        path=shortest_paths[t1][t2],
+                    )
+
+        if metric_closure.number_of_edges() == 0:
+            return set()
+
+        # Step 3: MST of metric closure
+        try:
+            mst = nx.minimum_spanning_tree(metric_closure, weight="weight")
+        except Exception:
+            return set()
+
+        # Step 4: Expand MST edges back to original paths, collect Steiner vertices
+        steiner_vertices: set[str] = set()
+        terminal_set = set(terminals)
+
+        for u, v, data in mst.edges(data=True):
+            path = data.get("path", [])
+            for node in path:
+                if node not in terminal_set:
+                    steiner_vertices.add(node)
+
+        logger.info(
+            f"Steiner tree: {len(terminals)} terminals → "
+            f"{len(steiner_vertices)} bridge tables: {steiner_vertices}"
+        )
+        return steiner_vertices
 
     def _get_table_node(self, table_name: str) -> TableNode | None:
         node_id = f"table:{table_name}"
