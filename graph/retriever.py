@@ -153,13 +153,24 @@ class GraphRetriever:
         scored.sort(key=lambda x: x[0], reverse=True)
 
         # Take top N tables above threshold
-        threshold = 0.3
+        # Use a two-tier approach: pick high-confidence tables first,
+        # then include medium-confidence tables up to the limit
+        threshold_high = 0.35
+        threshold_low = 0.25
         max_tables = self.config.max_tables_in_context
-        result = [t for score, t in scored if score > threshold][:max_tables]
 
-        # Always include at least top 2
-        if len(result) < 2 and scored:
-            result = [t for _, t in scored[:2]]
+        high_conf = [t for score, t in scored if score > threshold_high]
+        medium_conf = [t for score, t in scored if threshold_low < score <= threshold_high]
+
+        # Start with high-confidence, fill remaining with medium
+        result = high_conf[:max_tables]
+        remaining = max_tables - len(result)
+        if remaining > 0:
+            result.extend(medium_conf[:remaining])
+
+        # Always include at least top 3 (was 2 — helps complex queries)
+        if len(result) < 3 and scored:
+            result = [t for _, t in scored[:3]]
 
         logger.info(f"Retrieved {len(result)} relevant tables: {[t.name for t in result]}")
         return result

@@ -451,6 +451,7 @@ def main():
     parser.add_argument("--provider", default="gemini", choices=["openai", "gemini"])
     parser.add_argument("--api-key", required=True, help="LLM API key")
     parser.add_argument("--strong-model", default=None, help="Override strong model")
+    parser.add_argument("--deep-model", default=None, help="Override deep model (complex queries)")
     parser.add_argument("--fast-model", default=None, help="Override fast model")
     parser.add_argument("--db-host", default="localhost")
     parser.add_argument("--db-port", type=int, default=5432)
@@ -477,12 +478,16 @@ def main():
         llm_config.openai_api_key = args.api_key
         if args.strong_model:
             llm_config.openai_strong_model = args.strong_model
+        if args.deep_model:
+            llm_config.openai_deep_model = args.deep_model
         if args.fast_model:
             llm_config.openai_fast_model = args.fast_model
     else:
         llm_config.gemini_api_key = args.api_key
         if args.strong_model:
             llm_config.gemini_strong_model = args.strong_model
+        if args.deep_model:
+            llm_config.gemini_deep_model = args.deep_model
         if args.fast_model:
             llm_config.gemini_fast_model = args.fast_model
 

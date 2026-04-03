@@ -232,6 +232,7 @@ class AgentContext:
     row_count: int = 0
     final_answer: str = ""
     error: str | None = None
+    is_complex: bool = False
     llm_calls: list[LLMCallLog] = field(default_factory=list)
 
     @property

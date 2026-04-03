@@ -113,12 +113,24 @@ class SQLAgent:
 
     # ── State: RETRIEVE ───────────────────────────────────────────
 
+    # Threshold: queries needing this many tables are "complex" → use deep model
+    COMPLEX_TABLE_THRESHOLD = 6
+
     def _retrieve(self, ctx: AgentContext):
         """Retrieve relevant schema context via GraphRAG. No LLM call."""
         ctx.sub_questions = [ctx.original_question]
         ctx.retrieved_context = self.retriever.retrieve(
             ctx.original_question, ctx.sub_questions
         )
+
+        # Adaptive routing: detect complexity from retrieved context
+        num_tables = len(ctx.retrieved_context.tables)
+        if num_tables >= self.COMPLEX_TABLE_THRESHOLD:
+            ctx.is_complex = True
+            logger.info(f"Complex query detected ({num_tables} tables) → routing to deep model")
+        else:
+            ctx.is_complex = False
+
         ctx.state = AgentState.GENERATE
 
     # ── State: GENERATE ───────────────────────────────────────────
@@ -152,8 +164,12 @@ class SQLAgent:
             },
         ]
 
+        # Adaptive model selection: deep model for complex, strong for simple
+        model = self.llm.deep_model if getattr(ctx, 'is_complex', False) else self.llm.strong_model
+        logger.info(f"GENERATE using model: {model}")
+
         response, log = self.llm.chat(
-            messages, model=self.llm.strong_model, stage="generate"
+            messages, model=model, stage="generate"
         )
         ctx.llm_calls.append(log)
 
@@ -209,8 +225,9 @@ class SQLAgent:
             },
         ]
 
+        model = self.llm.deep_model if getattr(ctx, 'is_complex', False) else self.llm.strong_model
         response, log = self.llm.chat(
-            messages, model=self.llm.strong_model, stage="repair"
+            messages, model=model, stage="repair"
         )
         ctx.llm_calls.append(log)
 

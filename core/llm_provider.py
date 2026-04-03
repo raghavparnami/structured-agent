@@ -44,6 +44,12 @@ class LLMProvider:
             return self.config.openai_strong_model
         return self.config.gemini_strong_model
 
+    @property
+    def deep_model(self) -> str:
+        if self.provider == "openai":
+            return self.config.openai_deep_model
+        return self.config.gemini_deep_model
+
     def chat(
         self,
         messages: list[dict[str, str]],

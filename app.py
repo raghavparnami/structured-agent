@@ -186,12 +186,16 @@ def page_connect():
         if provider == "openai":
             api_key = st.text_input("OpenAI API Key", type="password")
             fast_model = st.selectbox(
-                "Fast Model (decompose/synthesize)",
+                "Fast Model (synthesize)",
                 ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1-nano"],
             )
             strong_model = st.selectbox(
                 "Strong Model (generate/repair)",
                 ["gpt-4o", "gpt-4.1", "gpt-4.1-mini"],
+            )
+            deep_model = st.selectbox(
+                "Deep Model (complex queries, 6+ tables)",
+                ["gpt-4o", "gpt-4.1"],
             )
             embedding_model = st.selectbox(
                 "Embedding Model",
@@ -204,8 +208,12 @@ def page_connect():
                 ["gemini-2.0-flash", "gemini-2.0-flash-lite"],
             )
             strong_model = st.selectbox(
-                "Strong Model",
-                ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+                "Strong Model (generate/repair)",
+                ["gemini-2.5-flash", "gemini-2.0-flash"],
+            )
+            deep_model = st.selectbox(
+                "Deep Model (complex queries, 6+ tables)",
+                ["gemini-2.5-pro", "gemini-2.5-flash"],
             )
             embedding_model = st.selectbox(
                 "Embedding Model",
@@ -233,11 +241,13 @@ def page_connect():
                     llm_config.openai_api_key = api_key
                     llm_config.openai_fast_model = fast_model
                     llm_config.openai_strong_model = strong_model
+                    llm_config.openai_deep_model = deep_model
                     llm_config.openai_embedding_model = embedding_model
                 else:
                     llm_config.gemini_api_key = api_key
                     llm_config.gemini_fast_model = fast_model
                     llm_config.gemini_strong_model = strong_model
+                    llm_config.gemini_deep_model = deep_model
                     llm_config.gemini_embedding_model = embedding_model
 
                 config = AppConfig(db=db_config, llm=llm_config)

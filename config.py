@@ -34,11 +34,13 @@ class LLMConfig:
     openai_api_key: str = ""
     openai_fast_model: str = "gpt-4o-mini"
     openai_strong_model: str = "gpt-4o"
+    openai_deep_model: str = "gpt-4o"           # used for complex queries (6+ tables)
     openai_embedding_model: str = "text-embedding-3-small"
     # Gemini models
     gemini_api_key: str = ""
     gemini_fast_model: str = "gemini-2.0-flash"
-    gemini_strong_model: str = "gemini-2.5-pro"
+    gemini_strong_model: str = "gemini-2.5-flash"
+    gemini_deep_model: str = "gemini-2.5-pro"   # used for complex queries (6+ tables)
     gemini_embedding_model: str = "gemini-embedding-001"
 
 
